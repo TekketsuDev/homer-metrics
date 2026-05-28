@@ -1,0 +1,7 @@
+[
+  {"id": "service1", "url": "https://your-domain.example.com",   "pve": true},
+  {"id": "service2", "url": "http://192.168.x.x:PORT"},
+  {"id": "service3", "url": "http://192.168.x.x:PORT",           "exporter": "192.168.x.x:9100"},
+  {"id": "service4", "url": "https://your-domain.example.com",   "exporter": "192.168.x.x:9100", "wget": true},
+  {"id": "service5", "url": null}
+]

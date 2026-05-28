@@ -1,0 +1,4 @@
+.env
+services.json
+*.pyc
+__pycache__/

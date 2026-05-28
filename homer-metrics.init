@@ -1,0 +1,10 @@
+#!/sbin/openrc-run
+# Place at /etc/init.d/homer-metrics
+# Secrets go in /etc/conf.d/homer-metrics (sourced automatically, use export)
+
+command=/usr/bin/python3
+command_args=/opt/homer-metrics.py
+command_background=true
+pidfile=/run/homer-metrics.pid
+stdout_log=/var/log/homer-metrics.log
+stderr_log=/var/log/homer-metrics.log
