@@ -149,62 +149,61 @@ def loop_online(svc):
         time.sleep(T_ONLINE)
 
 
-def loop_stats(svc):
-    """One fetch per cycle extracts bandwidth, RAM, and CPU — runs at T_BANDWIDTH rate."""
-    sid  = svc["id"]
-    exp  = svc["exporter"]
-    wget = svc.get("wget", False)
-    key  = (exp, sid)
+def loop_stats(exp, svcs, wget):
+    """Fetch exporter once per cycle; update all services that share this exporter."""
     while True:
         try:
             vals = fetch_exporter_wget(exp) if wget else fetch_exporter(exp)
             if vals:
                 now = time.time()
 
-                # bandwidth
                 rx_raw = {k: v for k, v in vals.get("node_network_receive_bytes_total",  {}).items() if '"lo"' not in k}
                 tx_raw = {k: v for k, v in vals.get("node_network_transmit_bytes_total", {}).items() if '"lo"' not in k}
                 rx = sum(rx_raw.values())
                 tx = sum(tx_raw.values())
-                with prev_lock:
-                    prev = prev_net.get(key, {})
-                    if prev.get("ts"):
-                        dt = now - prev["ts"]
-                        if dt > 0:
-                            rx_bps = max(0, round((rx - prev["rx"]) / dt))
-                            tx_bps = max(0, round((tx - prev["tx"]) / dt))
-                            _patch(sid,
-                                   net_rx=rx_bps, net_tx=tx_bps,
-                                   net_rx_fmt=fmt_bytes(rx_bps),
-                                   net_tx_fmt=fmt_bytes(tx_bps))
-                    prev_net[key] = {"rx": rx, "tx": tx, "ts": now}
 
-                # RAM — fall back to MemFree when lxcfs leaks host MemAvailable past cgroup MemTotal
                 mem   = vals.get("node_memory_MemTotal_bytes",     {})
                 avail = vals.get("node_memory_MemAvailable_bytes", {})
-                if mem and avail:
-                    total = list(mem.values())[0]
-                    free  = list(avail.values())[0]
-                    if total:
-                        if free > total:
-                            mem_free = vals.get("node_memory_MemFree_bytes", {})
-                            if mem_free:
-                                free = list(mem_free.values())[0]
-                        _patch(sid, ram_pct=round((total - free) / total * 100, 1))
-
-                # CPU
                 cpu_data = vals.get("node_cpu_seconds_total", {})
                 idle  = sum(v for k, v in cpu_data.items() if 'mode="idle"' in k)
-                total = sum(cpu_data.values())
-                with prev_lock:
-                    prev = prev_cpu.get(key, {})
-                    if prev.get("ts"):
-                        dt      = now - prev["ts"]
-                        d_idle  = idle  - prev["idle"]
-                        d_total = total - prev["total"]
-                        if dt > 0 and d_total > 0:
-                            _patch(sid, cpu_pct=round((1 - d_idle / d_total) * 100, 1))
-                    prev_cpu[key] = {"idle": idle, "total": total, "ts": now}
+                cpu_total = sum(cpu_data.values())
+
+                for svc in svcs:
+                    sid = svc["id"]
+                    key = (exp, sid)
+
+                    with prev_lock:
+                        prev = prev_net.get(key, {})
+                        if prev.get("ts"):
+                            dt = now - prev["ts"]
+                            if dt > 0:
+                                rx_bps = max(0, round((rx - prev["rx"]) / dt))
+                                tx_bps = max(0, round((tx - prev["tx"]) / dt))
+                                _patch(sid,
+                                       net_rx=rx_bps, net_tx=tx_bps,
+                                       net_rx_fmt=fmt_bytes(rx_bps),
+                                       net_tx_fmt=fmt_bytes(tx_bps))
+                        prev_net[key] = {"rx": rx, "tx": tx, "ts": now}
+
+                    if mem and avail:
+                        total = list(mem.values())[0]
+                        free  = list(avail.values())[0]
+                        if total:
+                            if free > total:
+                                mem_free = vals.get("node_memory_MemFree_bytes", {})
+                                if mem_free:
+                                    free = list(mem_free.values())[0]
+                            _patch(sid, ram_pct=round((total - free) / total * 100, 1))
+
+                    with prev_lock:
+                        prev = prev_cpu.get(key, {})
+                        if prev.get("ts"):
+                            dt      = now - prev["ts"]
+                            d_idle  = idle      - prev["idle"]
+                            d_total = cpu_total - prev["total"]
+                            if dt > 0 and d_total > 0:
+                                _patch(sid, cpu_pct=round((1 - d_idle / d_total) * 100, 1))
+                        prev_cpu[key] = {"idle": idle, "total": cpu_total, "ts": now}
 
         except Exception:
             pass
@@ -297,19 +296,21 @@ class Handler(BaseHTTPRequestHandler):
 # ── bootstrap ─────────────────────────────────────────────────────────────────
 
 def start_threads():
+    exporter_groups = {}
     for svc in SERVICES:
         with cache_lock:
             cache[svc["id"]] = _default_entry()
-
         threading.Thread(target=loop_online, args=(svc,), daemon=True).start()
         threading.Thread(target=loop_meta,   args=(svc,), daemon=True).start()
-
-        exp = svc.get("exporter")
-        if exp:
-            threading.Thread(target=loop_stats, args=(svc,), daemon=True).start()
-
         if svc.get("pve"):
             threading.Thread(target=loop_pve, daemon=True).start()
+        exp = svc.get("exporter")
+        if exp:
+            exporter_groups.setdefault(exp, []).append(svc)
+
+    for exp, svcs in exporter_groups.items():
+        wget = any(s.get("wget") for s in svcs)
+        threading.Thread(target=loop_stats, args=(exp, svcs, wget), daemon=True).start()
 
 
 if __name__ == "__main__":
